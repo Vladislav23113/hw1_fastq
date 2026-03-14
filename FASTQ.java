@@ -1,4 +1,4 @@
-package main.parser;
+package main;
 
 import java.io.BufferedReader;
 import java.io.BufferedWriter;
@@ -73,27 +73,29 @@ public class FASTQ {
         return count > 0 ? (double) phredSum / count : 0;
     }
 
-    public long trim(int windowSize, int targetQuality) throws FASTQException {
-        long trimmedCount = 0; // count of trimmed sequence
-        Path outputPath = generateOutputPath(windowSize, targetQuality);
+    public long trim(int windowLength, int targetQuality) throws FASTQException {
+        Path outputPath = generateOutputPath(windowLength, targetQuality);
+        long trimmedCount = 0; // count of deleted sequences after trimming
 
         try (BufferedReader reader = Files.newBufferedReader(path);
              BufferedWriter writer = Files.newBufferedWriter(outputPath)) {
 
             String[] read;
             while ((read = readNext(reader)) != null) {
-                String sequence = read[SEQUENCE_LINE];
-                String quality = read[QUALITY_LINE];
+                String sequenceLine = read[SEQUENCE_LINE];
+                String qualityLine = read[QUALITY_LINE];
 
-                String[] trimmed = trim(sequence, quality, windowSize, targetQuality); // [seq, qual]
+                String[] trimmed = trim(sequenceLine, qualityLine, windowLength, targetQuality); // [seq, qual]
 
-                if (trimmed[0].length() < sequence.length()) {
-                    if (trimmed[0].isEmpty()) {
-                        trimmedCount++;
-                        continue;
-                    }
+                if (trimmed == null || trimmed[0].isEmpty()) {
+                    trimmedCount++;
+                    continue;
+                }
 
-                    String[] toWrite = new String[]{read[HEADER_LINE], trimmed[0], read[PLUS_LINE], trimmed[1]};
+                if (trimmed[0].length() < sequenceLine.length()) {
+                    String updatedPlusLine = updateLengthInPlusLine(read[PLUS_LINE], trimmed[0].length());
+                    String[] toWrite = new String[]{read[HEADER_LINE], trimmed[0], updatedPlusLine, trimmed[1]};
+
                     write(writer, toWrite);
                 } else {
                     write(writer, read);
@@ -106,78 +108,87 @@ public class FASTQ {
         return trimmedCount;
     }
 
+    /**
+     * Updates value of length in PLUS_LINE
+     */
+    private String updateLengthInPlusLine(String plusLine, int newLength) {
+        if (plusLine.contains("length=")) {
+            return plusLine.replaceAll("length=\\d+", "length=" + newLength);
+        }
+
+        return plusLine;
+    }
+
+
+    /**
+     * Write 4 lines describing one reading
+     */
     private void write(BufferedWriter writer, String[] reading) throws IOException {
+        if (reading.length != 4) return;
+
         for (String s : reading) {
             writer.write(s);
             writer.newLine();
         }
     }
 
-    private Path generateOutputPath(int windowSize, int quality) {
+    private Path generateOutputPath(int windowLength, int quality) {
         String fileName = path.getFileName().toString();
-        String newFileName = String.format("%s.trimmed_w%d_q%d", fileName, windowSize, quality);
+        String newFileName = String.format("%s.tr_w%d_q%d", fileName, windowLength, quality);
 
         return path.resolveSibling(newFileName);
     }
 
-    private String[] trim(String sequence, String qualityLine, int windowSize, int targetQuality) {
+    private String[] trim(String sequenceLine, String qualityLine, int windowLength, int requiredQuality) {
+        int totalRequiredQuality = requiredQuality * windowLength;
 
-        int length = sequence.length();
+        int[] quals = getQualityAsInteger(qualityLine);
 
-        if (length < windowSize) {
-            return new String[]{"", ""};
+        if (quals.length < windowLength) {
+            return null;
         }
-
-        int[] quals = getQuality(qualityLine);
 
         int total = 0;
-
-        for (int i = 0; i < windowSize; i++) {
+        for (int i = 0; i < windowLength; i++)
             total += quals[i];
-        }
 
-        int requiredTotal = windowSize * targetQuality;
+        if (total < totalRequiredQuality)
+            return null;
 
-        if (total < requiredTotal) {
-            return new String[]{"", ""};
-        }
+        int lengthToKeep = quals.length;
 
-        int lengthToKeep = length;
-
-        for (int i = 0; i < length - windowSize; i++) {
-
-            total = total - quals[i] + quals[i + windowSize];
-
-            if (total < requiredTotal) {
-                lengthToKeep = i + windowSize;
+        for (int i = 0; i < quals.length - windowLength; i++) {
+            total = total - quals[i] + quals[i + windowLength];
+            if (total < totalRequiredQuality) {
+                lengthToKeep = i + windowLength;
                 break;
             }
         }
 
         int i = lengthToKeep;
-        int lastBaseQuality = quals[i - 1];
 
-        while (lastBaseQuality < targetQuality && i > 1) {
-            i--;
-            lastBaseQuality = quals[i - 1];
-        }
+        if (i < 1)
+            return null;
 
-        if (i < 1) {
-            return new String[]{"", ""};
-        }
-
-        if (i < length) {
+        if (i < quals.length) {
             return new String[]{
-                    sequence.substring(0, i),
+                    sequenceLine.substring(0, i),
                     qualityLine.substring(0, i)
             };
         }
 
-        return new String[]{sequence, qualityLine};
+        return new String[]{sequenceLine, qualityLine};
     }
 
-    private int[] getQuality(String qualityLine) {
-        return qualityLine.chars().map(ch -> (int) ch - 33).toArray();
+    private int[] getQualityAsInteger(String qualityLine) {
+        int[] qual = new int[qualityLine.length()];
+
+        for (int i = 0; i < qualityLine.length(); i++) {
+            char ch = qualityLine.charAt(i);
+            qual[i] = (int) ch - 33;
+        }
+
+        return qual;
     }
 
     /**
@@ -229,10 +240,6 @@ public class FASTQ {
     public static class FASTQException extends Exception {
         public FASTQException(Exception cause) {
             super(cause);
-        }
-
-        public FASTQException(String message, Exception cause) {
-            super(message, cause);
         }
     }
 }
